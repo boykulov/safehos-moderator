@@ -9,16 +9,14 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-export const login = (email: string, password: string) =>
-  api.post('/auth/login', { email, password });
-
-export const getPendingEvents = (companyId: string) =>
-  api.get('/domain/pending');
-
+export const login = (email: string, password: string) => api.post('/auth/login', { email, password });
+export const getPendingEvents = (_: string) => api.get('/domain/pending');
+export const getDeferredEvents = () => api.get('/domain/deferred');
+export const getInfoEvents = () => api.get('/domain/info');
 export const makeDecision = (eventId: string, action: string, reason: string, isGlobal: boolean) =>
   api.post(`/decision/${eventId}`, { action, reason, isGlobal });
-
-export const getHistory = () =>
-  api.get('/decision/history');
+export const deferEvent = (eventId: string, minutes: number) =>
+  api.post(`/domain/defer/${eventId}`, { minutes });
+export const getHistory = () => api.get('/decision/history');
 
 export default api;
