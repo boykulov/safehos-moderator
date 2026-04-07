@@ -4,6 +4,7 @@ import {
   getHistory, getAllowlist, getBlocklist, addToAllowlist, removeFromList,
   updateAllowlistEntry, exportAllowlist
 } from '../api';
+import api from '../api';
 
 interface Props { user: any; onLogout: () => void; }
 
@@ -32,6 +33,24 @@ const CATEGORY_LABELS: Record<string, string> = {
 
 const CATEGORIES = Object.keys(CATEGORY_LABELS);
 
+
+// Извлекает корневой домен (последние два сегмента)
+// stats.nebulanet.uz → nebulanet.uz
+// sub.example.com → example.com
+// example.com → example.com
+function getRootDomain(domain: string): string {
+  const parts = domain.split('.');
+  // Учитываем двухуровневые TLD типа co.uk, com.ua
+  const twoPartTLDs = ['co.uk','com.ua','org.uk','net.uk','me.uk','com.au','net.au'];
+  if (parts.length >= 3) {
+    const possibleTLD = parts.slice(-2).join('.');
+    if (twoPartTLDs.includes(possibleTLD)) {
+      return parts.slice(-3).join('.');
+    }
+  }
+  return parts.slice(-2).join('.');
+}
+
 export default function ModeratorPanel({ user, onLogout }: Props) {
   const [events, setEvents] = useState<any[]>([]);
   const [deferred, setDeferred] = useState<any[]>([]);
@@ -53,6 +72,7 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
   const [allowlistTypeFilter, setAllowlistTypeFilter] = useState<''|'global'|'org'>('');
   const [recentlyApproved, setRecentlyApproved] = useState<any[]>([]);
   const [blocklistFilter, setBlocklistFilter] = useState('');
+  const [importing, setImporting] = useState(false);
   const knownIds = useRef<Set<string>>(new Set());
   const notifTimer = useRef<any>(null);
 
@@ -113,6 +133,71 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
   // eslint-disable-next-line
   }, []);
 
+  // Wildcard одобрение — применяет к корневому домену
+  const handleWildcardDecision = async (
+    eventId: string, domain: string, action: 'approved'|'blocked', isGlobal: boolean
+  ) => {
+    const rootDomain = getRootDomain(domain);
+    const isSubdomain = rootDomain !== domain;
+    setDeciding(eventId);
+    knownIds.current.delete(eventId);
+    try {
+      const ev = events.find(e => e.id === eventId) || deferred.find(e => e.id === eventId);
+      const rt = ev ? Math.floor((Date.now() - new Date(ev.createdAt).getTime()) / 1000) : 0;
+      console.log('handleWildcardDecision:', {eventId, domain, rootDomain, isSubdomain, ev});
+
+      if (isSubdomain) {
+        // Шаг 1: Добавляем ТОЛЬКО корневой домен в allowlist с wildcard
+        // (поддомен НЕ добавляем — он покрывается wildcard)
+        try {
+          await addToAllowlist({
+            domain: rootDomain, isGlobal, isWildcard: true,
+            category: 'other',
+            notes: `Wildcard approved from queue (${domain})`
+          });
+        } catch(e: any) {
+          // Если уже есть — обновляем isWildcard через PATCH
+          console.log('addToAllowlist conflict:', e?.response?.data?.message);
+        }
+
+        // Шаг 2: Закрываем ВСЕ pending события для этого корневого домена
+        // (и текущий поддомен, и другие поддомены) — без добавления в allowlist
+        const pending = await getPendingEvents('');
+        const allSubEvents = pending.data.filter((e: any) =>
+          getRootDomain(e.domain) === rootDomain
+        );
+        for (const sub of allSubEvents) {
+          try {
+            await makeDecision(sub.id, 'approved',
+              `Auto wildcard *.${rootDomain}`, isGlobal,
+              {isWildcard: false, category: 'other'}
+            );
+          } catch(e) {}
+        }
+        showNotif(`✅ *.${rootDomain} — ${allSubEvents.length} доменов закрыто из очереди`, 'success');
+      } else {
+        // Это корневой домен — одобряем с wildcard напрямую
+        await makeDecision(eventId, action,
+          `Wildcard root response: ${rt}s`, isGlobal,
+          {isWildcard: true, category: 'other'}
+        );
+        showNotif(`✅ *.${rootDomain} одобрён (wildcard)`, 'success');
+      }
+
+      if (action === 'approved' && ev) {
+        setRecentlyApproved(prev => [{
+          domain: `*.${rootDomain}`, eventId, approvedAt: new Date().toISOString(),
+          responseTime: rt, isGlobal, source: 'queue'
+        }, ...prev].slice(0, 20));
+      }
+      playSound(1047);
+      fetchPending(); fetchDeferred(); fetchHistory(); fetchAllowlist();
+    } catch(e: any) {
+      showNotif('Ошибка wildcard: ' + (e?.response?.data?.message || e?.message || ''), 'error');
+    }
+    finally { setDeciding(null); }
+  };
+
   const handleDecision = async (
     eventId: string, action: 'approved'|'blocked', isGlobal = false,
     options?: { isWildcard?: boolean; category?: string }
@@ -124,7 +209,8 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
       const rt = ev ? Math.floor((Date.now() - new Date(ev.createdAt).getTime()) / 1000) : 0;
       await makeDecision(eventId, action, `Response time: ${rt}s`, isGlobal, options);
       playSound(action === 'approved' ? 1047 : 440);
-      showNotif(action === 'approved' ? `✅ Одобрен за ${rt}с` : `🚫 Заблокирован за ${rt}с`, action === 'approved' ? 'success' : 'error');
+      const wildcardInfo = options?.isWildcard ? ` (wildcard *.${ev?.domain})` : '';
+      showNotif(action === 'approved' ? `✅ Одобрен за ${rt}с${wildcardInfo}` : `🚫 Заблокирован за ${rt}с`, action === 'approved' ? 'success' : 'error');
       // Трекинг недавно одобренных
       if (action === 'approved' && ev) {
         setRecentlyApproved(prev => [{
@@ -146,6 +232,28 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
       fetchPending(); fetchDeferred();
     } catch(e) { showNotif('Ошибка', 'error'); }
     finally { setDeciding(null); }
+  };
+
+  const handleImportCSV = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const resp = await api.post('/domain/allowlist/import', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      const { imported, skipped, errors, total } = resp.data;
+      showNotif(`✅ Импорт: ${imported} добавлено, ${skipped} пропущено из ${total}`, 'success');
+      if (errors.length) console.warn('Import errors:', errors);
+      fetchAllowlist();
+    } catch(e: any) {
+      showNotif('❌ Ошибка импорта: ' + (e?.response?.data?.message || e.message), 'error');
+    } finally {
+      setImporting(false);
+      e.target.value = '';
+    }
   };
 
   const handleAddToAllowlist = async () => {
@@ -406,6 +514,25 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
                       disabled={deciding===event.id}>
                       {deciding===event.id?'...':'✅ Одобрить'}
                     </button>
+
+                    {/* Кнопка Wildcard — одобряет КОРНЕВОЙ домен + все поддомены */}
+                    {(()=>{
+                      const rootDomain = getRootDomain(event.domain);
+                      const isSubdomain = rootDomain !== event.domain;
+                      return (
+                        <button
+                          style={{flex:1,minWidth:80,padding:'9px',background:'rgba(63,185,80,0.05)',border:'2px dashed rgba(63,185,80,0.4)',borderRadius:7,color:'#3fb950',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit',display:'flex',alignItems:'center',justifyContent:'center',gap:4,flexDirection:'column'}}
+                          onClick={()=>handleWildcardDecision(event.id, event.domain, 'approved', false)}
+                          disabled={deciding===event.id}
+                          title={`Одобрить *.${rootDomain} (все поддомены)`}>
+                          {deciding===event.id?'...':<>
+                            <span style={{fontSize:11}}>✅ *.{rootDomain}</span>
+                            {isSubdomain&&<span style={{fontSize:9,opacity:0.7}}>корень: {rootDomain}</span>}
+                          </>}
+                        </button>
+                      );
+                    })()}
+
                     <button style={{flex:1,minWidth:80,padding:'9px',background:'rgba(248,81,73,0.08)',border:'1px solid rgba(248,81,73,0.3)',borderRadius:7,color:'#f85149',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}
                       onClick={()=>handleDecision(event.id,'blocked',false)}
                       disabled={deciding===event.id}>
@@ -517,6 +644,10 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
                 style={{padding:'8px 14px',background:'rgba(56,139,253,0.1)',border:'1px solid rgba(56,139,253,0.3)',borderRadius:7,color:'#388bfd',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}>
                 📥 CSV
               </button>
+              <label style={{padding:'8px 14px',background:'rgba(63,185,80,0.1)',border:'1px solid rgba(63,185,80,0.3)',borderRadius:7,color:'#3fb950',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:'inherit',display:'inline-flex',alignItems:'center',gap:5}}>
+                {importing ? '⏳...' : '📤 Импорт'}
+                <input type="file" accept=".csv" onChange={handleImportCSV} style={{display:'none'}} />
+              </label>
               <select value={allowlistSort} onChange={e=>setAllowlistSort(e.target.value as any)}
                 style={{padding:'8px 10px',background:'#161b22',border:'1px solid #30363d',borderRadius:7,color:'#e6edf3',fontSize:12,fontFamily:'inherit',outline:'none'}}>
                 <option value="alpha">A→Z</option>
