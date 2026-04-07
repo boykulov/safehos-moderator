@@ -17,7 +17,7 @@ export const login = (email: string, password: string) =>
 // Domain checks
 export const getPendingEvents = (_: string) => api.get('/domain/pending');
 export const getDeferredEvents = () => api.get('/domain/deferred');
-export const getInfoEvents = () => api.get('/domain/info');
+
 
 // Decisions
 export const makeDecision = (
@@ -41,9 +41,7 @@ export const addToAllowlist = (data: {
   category?: string; notes?: string;
 }) => api.post('/domain/allowlist', data);
 
-export const addToBlocklist = (data: {
-  domain: string; isGlobal?: boolean; reason?: string; notes?: string;
-}) => api.post('/domain/blocklist', data);
+
 
 export const removeFromList = (domain: string) =>
   api.delete(`/domain/decision/${encodeURIComponent(domain)}`);

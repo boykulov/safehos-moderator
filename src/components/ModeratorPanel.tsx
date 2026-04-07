@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   getPendingEvents, getDeferredEvents, makeDecision, deferEvent,
-  getHistory, getAllowlist, getBlocklist, addToAllowlist, addToBlocklist, removeFromList,
+  getHistory, getAllowlist, getBlocklist, addToAllowlist, removeFromList,
   updateAllowlistEntry, exportAllowlist
 } from '../api';
-import api from '../api';
 
 interface Props { user: any; onLogout: () => void; }
 
@@ -222,15 +221,23 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
   const historyGroups = Object.values(groupedHistory) as any[];
 
   const filteredAllowlist = allowlist
-    .filter(d =>
-      (!allowlistFilter || d.domain.includes(allowlistFilter.toLowerCase())) &&
-      (!allowlistCategory || d.category === allowlistCategory) &&
-      (!allowlistTypeFilter || (allowlistTypeFilter === 'global' ? d.isGlobal : !d.isGlobal))
-    )
+    .filter(d => {
+      // Поиск — нечувствительный к регистру
+      const matchSearch = !allowlistFilter ||
+        d.domain.toLowerCase().includes(allowlistFilter.toLowerCase()) ||
+        (d.notes || '').toLowerCase().includes(allowlistFilter.toLowerCase());
+      // Фильтр по категории
+      const matchCategory = !allowlistCategory || d.category === allowlistCategory;
+      // Фильтр по типу global/org
+      const matchType = !allowlistTypeFilter ||
+        (allowlistTypeFilter === 'global' ? d.isGlobal === true : d.isGlobal === false);
+      return matchSearch && matchCategory && matchType;
+    })
     .sort((a, b) => {
       if (allowlistSort === 'alpha') return a.domain.localeCompare(b.domain);
       if (allowlistSort === 'newest') return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-      return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (allowlistSort === 'oldest') return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      return 0;
     });
 
   const filteredBlocklist = blocklist.filter(d =>
@@ -466,6 +473,25 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
         {/* ==================== ALLOWLIST ==================== */}
         {activeTab==='allowlist'&&(
           <div>
+            {/* Recently Approved — вверху */}
+            {recentlyApproved.length>0&&(
+              <div style={{marginBottom:16,background:'rgba(63,185,80,0.05)',border:'1px solid rgba(63,185,80,0.2)',borderRadius:10,padding:'12px 16px'}}>
+                <div style={{fontSize:11,fontWeight:700,color:'#3fb950',marginBottom:8,textTransform:'uppercase',letterSpacing:1}}>
+                  ✅ Недавно одобренные (в этой сессии) — {recentlyApproved.length}
+                </div>
+                <div style={{display:'flex',flexDirection:'column',gap:4}}>
+                  {recentlyApproved.map((r:any,i:number)=>(
+                    <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 10px',background:'rgba(63,185,80,0.05)',borderRadius:6}}>
+                      <span style={{fontSize:13,fontFamily:'monospace',color:'#3fb950',flex:1}}>{r.domain}</span>
+                      <span style={{fontSize:10,color:'#484f58'}}>⏱ {r.responseTime}с</span>
+                      {r.isGlobal&&<span style={{fontSize:9,background:'rgba(56,139,253,0.1)',border:'1px solid rgba(56,139,253,0.2)',color:'#388bfd',padding:'1px 5px',borderRadius:3}}>global</span>}
+                      <span style={{fontSize:10,color:'#484f58'}}>{new Date(r.approvedAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Toolbar */}
             <div style={{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
               <input
@@ -499,9 +525,9 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
               </select>
               <select value={allowlistTypeFilter} onChange={e=>setAllowlistTypeFilter(e.target.value as any)}
                 style={{padding:'8px 10px',background:'#161b22',border:'1px solid #30363d',borderRadius:7,color:'#e6edf3',fontSize:12,fontFamily:'inherit',outline:'none'}}>
-                <option value="">Все типы</option>
-                <option value="global">Global</option>
-                <option value="org">Org</option>
+                <option value="">Все ({allowlist.length})</option>
+                <option value="global">🌍 Global ({allowlist.filter(d=>d.isGlobal).length})</option>
+                <option value="org">🏢 Org ({allowlist.filter(d=>!d.isGlobal).length})</option>
               </select>
             </div>
 
@@ -573,23 +599,6 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
               <div style={{textAlign:'center',padding:'60px 20px'}}>
                 <div style={{fontSize:44,marginBottom:12}}>✅</div>
                 <p style={{color:'#7d8590',fontSize:13}}>Нет доменов по фильтру</p>
-              </div>
-            )}
-
-            {/* Recently Approved */}
-            {recentlyApproved.length>0&&(
-              <div style={{marginTop:24}}>
-                <div style={{fontSize:12,fontWeight:600,color:'#3fb950',marginBottom:8,textTransform:'uppercase',letterSpacing:1}}>
-                  ✅ Недавно одобренные (в этой сессии)
-                </div>
-                {recentlyApproved.map((r:any,i:number)=>(
-                  <div key={i} style={{display:'flex',alignItems:'center',gap:10,background:'rgba(63,185,80,0.05)',border:'1px solid rgba(63,185,80,0.15)',borderRadius:8,padding:'8px 14px',marginBottom:4}}>
-                    <span style={{fontSize:13,fontFamily:'monospace',color:'#3fb950',flex:1}}>{r.domain}</span>
-                    <span style={{fontSize:10,color:'#484f58'}}>⏱ {r.responseTime}с</span>
-                    {r.isGlobal&&<span style={{fontSize:9,background:'rgba(56,139,253,0.1)',border:'1px solid rgba(56,139,253,0.2)',color:'#388bfd',padding:'1px 5px',borderRadius:3}}>global</span>}
-                    <span style={{fontSize:10,color:'#484f58'}}>{new Date(r.approvedAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}</span>
-                  </div>
-                ))}
               </div>
             )}
 
