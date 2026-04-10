@@ -53,3 +53,6 @@ export const updateAllowlistEntry = (id: string, data: { category?: string; note
 
 export const exportAllowlist = () =>
   api.get('/domain/allowlist/export', { responseType: 'blob' });
+
+export const getRecentlyApproved = () =>
+  api.get('/decision/recent-approved');

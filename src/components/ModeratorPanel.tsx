@@ -19,28 +19,29 @@ function LiveTimer({ startTime }: { startTime: string }) {
   }, [startTime]);
   const m = Math.floor(elapsed / 60), s = elapsed % 60;
   const color = elapsed > 120 ? '#f85149' : elapsed > 60 ? '#f0a84a' : '#3fb950';
-  return <span style={{ fontFamily: 'monospace', fontSize: 12, color, fontWeight: 700 }}>⏱ {m}:{s.toString().padStart(2,'0')}</span>;
+  return <span style={{ fontFamily: 'monospace', fontSize: 12, color, fontWeight: 700 }}>{m}:{s.toString().padStart(2,'0')}</span>;
 }
 
 type Tab = 'pending' | 'deferred' | 'history' | 'allowlist' | 'blocklist';
 
 const CATEGORY_LABELS: Record<string, string> = {
-  loadboard: '🚛 Load Board', factoring: '💰 Factoring', broker: '🏢 Broker',
-  carrier: '🚚 Carrier', maps: '🗺 Maps', email: '📧 Email',
-  eld: '📡 ELD', tms: '💻 TMS', document: '📄 Documents',
-  support: '🎧 Support', auth: '🔐 Auth', cdn: '☁️ CDN', other: '🔧 Other',
+  other: 'Other', loadboard: 'Load Board', factoring: 'Factoring', broker: 'Broker',
+  carrier: 'Carrier', maps: 'Maps', email: 'Email',
+  eld: 'ELD', tms: 'TMS', document: 'Documents',
+  support: 'Support', auth: 'Auth', cdn: 'CDN',
+};
+
+const CATEGORY_ICONS: Record<string, string> = {
+  other: '\u{1F527}', loadboard: '\u{1F69B}', factoring: '\u{1F4B0}', broker: '\u{1F3E2}',
+  carrier: '\u{1F69A}', maps: '\u{1F5FA}', email: '\u{1F4E7}',
+  eld: '\u{1F4E1}', tms: '\u{1F4BB}', document: '\u{1F4C4}',
+  support: '\u{1F3A7}', auth: '\u{1F510}', cdn: '\u{2601}\u{FE0F}',
 };
 
 const CATEGORIES = Object.keys(CATEGORY_LABELS);
 
-
-// Извлекает корневой домен (последние два сегмента)
-// stats.nebulanet.uz → nebulanet.uz
-// sub.example.com → example.com
-// example.com → example.com
 function getRootDomain(domain: string): string {
   const parts = domain.split('.');
-  // Учитываем двухуровневые TLD типа co.uk, com.ua
   const twoPartTLDs = ['co.uk','com.ua','org.uk','net.uk','me.uk','com.au','net.au'];
   if (parts.length >= 3) {
     const possibleTLD = parts.slice(-2).join('.');
@@ -68,13 +69,22 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
   const [addForm, setAddForm] = useState({ domain:'', isGlobal:false, isWildcard:true, category:'other', notes:'' });
   const [editEntry, setEditEntry] = useState<any>(null);
   const [editForm, setEditForm] = useState({ category:'other', notes:'', isWildcard:false });
-  const [allowlistSort, setAllowlistSort] = useState<'alpha'|'newest'|'oldest'>('alpha');
+  const [allowlistSort, setAllowlistSort] = useState<'alpha'|'newest'|'oldest'>('newest');
+  const [allowlistRecent, setAllowlistRecent] = useState<''|'24h'|'7d'>('');
   const [allowlistTypeFilter, setAllowlistTypeFilter] = useState<''|'global'|'org'>('');
-  const [recentlyApproved, setRecentlyApproved] = useState<any[]>([]);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [blocklistFilter, setBlocklistFilter] = useState('');
   const [importing, setImporting] = useState(false);
   const knownIds = useRef<Set<string>>(new Set());
   const notifTimer = useRef<any>(null);
+
+  const toggleGroup = (key: string) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
 
   const showNotif = (msg: string, type = 'info') => {
     if (notifTimer.current) clearTimeout(notifTimer.current);
@@ -102,7 +112,7 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
       const trulyNew = newEvents.filter(e => !knownIds.current.has(e.id));
       if (trulyNew.length > 0) {
         trulyNew.forEach(e => knownIds.current.add(e.id));
-        showNotif(`🚨 Новый запрос: ${trulyNew[0].domain}`, 'warning');
+        showNotif(`Новый запрос: ${trulyNew[0].domain}`, 'warning');
         playSound(660);
       }
       setEvents(newEvents);
@@ -133,7 +143,6 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
   // eslint-disable-next-line
   }, []);
 
-  // Wildcard одобрение — применяет к корневому домену
   const handleWildcardDecision = async (
     eventId: string, domain: string, action: 'approved'|'blocked', isGlobal: boolean
   ) => {
@@ -144,11 +153,8 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
     try {
       const ev = events.find(e => e.id === eventId) || deferred.find(e => e.id === eventId);
       const rt = ev ? Math.floor((Date.now() - new Date(ev.createdAt).getTime()) / 1000) : 0;
-      console.log('handleWildcardDecision:', {eventId, domain, rootDomain, isSubdomain, ev});
 
       if (isSubdomain) {
-        // Шаг 1: Добавляем ТОЛЬКО корневой домен в allowlist с wildcard
-        // (поддомен НЕ добавляем — он покрывается wildcard)
         try {
           await addToAllowlist({
             domain: rootDomain, isGlobal, isWildcard: true,
@@ -156,12 +162,9 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
             notes: `Wildcard approved from queue (${domain})`
           });
         } catch(e: any) {
-          // Если уже есть — обновляем isWildcard через PATCH
           console.log('addToAllowlist conflict:', e?.response?.data?.message);
         }
 
-        // Шаг 2: Закрываем ВСЕ pending события для этого корневого домена
-        // (и текущий поддомен, и другие поддомены) — без добавления в allowlist
         const pending = await getPendingEvents('');
         const allSubEvents = pending.data.filter((e: any) =>
           getRootDomain(e.domain) === rootDomain
@@ -174,25 +177,17 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
             );
           } catch(e) {}
         }
-        showNotif(`✅ *.${rootDomain} — ${allSubEvents.length} доменов закрыто из очереди`, 'success');
+        showNotif(`*.${rootDomain} — ${allSubEvents.length} доменов закрыто`, 'success');
       } else {
-        // Это корневой домен — одобряем с wildcard напрямую
         await makeDecision(eventId, action,
           `Wildcard root response: ${rt}s`, isGlobal,
           {isWildcard: true, category: 'other'}
         );
-        showNotif(`✅ *.${rootDomain} одобрён (wildcard)`, 'success');
+        showNotif(`*.${rootDomain} одобрен (wildcard)`, 'success');
       }
 
-      if (action === 'approved' && ev) {
-        setRecentlyApproved(prev => [{
-          domain: `*.${rootDomain}`, eventId, approvedAt: new Date().toISOString(),
-          responseTime: rt, isGlobal, source: 'queue'
-        }, ...prev].slice(0, 20));
-      }
       playSound(1047);
-      fetchPending(); fetchDeferred(); fetchHistory(); fetchAllowlist();
-    } catch(e: any) {
+      fetchPending(); fetchDeferred(); fetchHistory(); fetchAllowlist();     } catch(e: any) {
       showNotif('Ошибка wildcard: ' + (e?.response?.data?.message || e?.message || ''), 'error');
     }
     finally { setDeciding(null); }
@@ -210,16 +205,8 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
       await makeDecision(eventId, action, `Response time: ${rt}s`, isGlobal, options);
       playSound(action === 'approved' ? 1047 : 440);
       const wildcardInfo = options?.isWildcard ? ` (wildcard *.${ev?.domain})` : '';
-      showNotif(action === 'approved' ? `✅ Одобрен за ${rt}с${wildcardInfo}` : `🚫 Заблокирован за ${rt}с`, action === 'approved' ? 'success' : 'error');
-      // Трекинг недавно одобренных
-      if (action === 'approved' && ev) {
-        setRecentlyApproved(prev => [{
-          domain: ev.domain, eventId, approvedAt: new Date().toISOString(),
-          responseTime: rt, isGlobal, source: 'queue'
-        }, ...prev].slice(0, 20));
-      }
-      fetchPending(); fetchDeferred(); fetchHistory(); fetchAllowlist(); fetchBlocklist();
-    } catch(e) { showNotif('Ошибка', 'error'); }
+      showNotif(action === 'approved' ? `Одобрен за ${rt}с${wildcardInfo}` : `Заблокирован за ${rt}с`, action === 'approved' ? 'success' : 'error');
+      fetchPending(); fetchDeferred(); fetchHistory(); fetchAllowlist(); fetchBlocklist();     } catch(e) { showNotif('Ошибка', 'error'); }
     finally { setDeciding(null); }
   };
 
@@ -228,7 +215,7 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
     try {
       await deferEvent(eventId, minutes);
       setShowDeferPicker(null);
-      showNotif(`⏸ Отложено на ${minutes} минут`, 'info');
+      showNotif(`Отложено на ${minutes} минут`, 'info');
       fetchPending(); fetchDeferred();
     } catch(e) { showNotif('Ошибка', 'error'); }
     finally { setDeciding(null); }
@@ -245,11 +232,11 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
       const { imported, skipped, errors, total } = resp.data;
-      showNotif(`✅ Импорт: ${imported} добавлено, ${skipped} пропущено из ${total}`, 'success');
+      showNotif(`Импорт: ${imported} добавлено, ${skipped} пропущено из ${total}`, 'success');
       if (errors.length) console.warn('Import errors:', errors);
       fetchAllowlist();
     } catch(e: any) {
-      showNotif('❌ Ошибка импорта: ' + (e?.response?.data?.message || e.message), 'error');
+      showNotif('Ошибка импорта: ' + (e?.response?.data?.message || e.message), 'error');
     } finally {
       setImporting(false);
       e.target.value = '';
@@ -260,29 +247,47 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
     if (!addForm.domain) return;
     try {
       await addToAllowlist(addForm);
-      showNotif(`✅ ${addForm.domain} добавлен в allowlist`, 'success');
+      showNotif(`${addForm.domain} добавлен в allowlist`, 'success');
       setAddForm({ domain:'', isGlobal:false, isWildcard:true, category:'other', notes:'' });
       setShowAddForm(false);
       fetchAllowlist();
     } catch(e: any) {
       const msg = e?.response?.data?.message || e?.message || 'Ошибка добавления';
-      showNotif(`❌ ${msg}`, 'error');
+      showNotif(msg, 'error');
     }
   };
 
   const handleRemoveFromAllowlist = async (domain: string) => {
     try {
       await removeFromList(domain);
-      showNotif(`🗑 ${domain} удалён`, 'info');
+      showNotif(`${domain} удален`, 'info');
       fetchAllowlist(); fetchBlocklist();
     } catch(e) { showNotif('Ошибка удаления', 'error'); }
+  };
+
+  const handleUnblock = async (domain: string) => {
+    try {
+      await removeFromList(domain);
+      await addToAllowlist({ domain, isGlobal: false, isWildcard: true, category: 'other', notes: 'Unblocked from blocklist' });
+      showNotif(`${domain} разблокирован и добавлен в allowlist`, 'success');
+      fetchAllowlist(); fetchBlocklist();
+    } catch(e: any) {
+      const msg = e?.response?.data?.message || e?.message || 'Ошибка';
+      showNotif(msg, 'error');
+    }
   };
 
   const handleEditSave = async () => {
     if (!editEntry) return;
     try {
-      await updateAllowlistEntry(editEntry.id, editForm);
-      showNotif(`✏️ ${editEntry.domain} обновлён`, 'success');
+      const res = await updateAllowlistEntry(editEntry.id, editForm);
+      const closed = res.data?.closedSubdomains || 0;
+      if (closed > 0) {
+        showNotif(`${editEntry.domain} обновлен — ${closed} subdomain(s) auto-approved`, 'success');
+        fetchPending(); fetchDeferred();
+      } else {
+        showNotif(`${editEntry.domain} обновлен`, 'success');
+      }
       setEditEntry(null);
       fetchAllowlist();
     } catch(e) { showNotif('Ошибка редактирования', 'error'); }
@@ -295,30 +300,28 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
       const a = document.createElement('a');
       a.href = url; a.download = 'safehos-allowlist.csv';
       a.click(); window.URL.revokeObjectURL(url);
-      showNotif('📥 CSV экспортирован', 'success');
+      showNotif('CSV экспортирован', 'success');
     } catch(e) { showNotif('Ошибка экспорта', 'error'); }
   };
 
   const rc = (s: number) => s >= 70 ? '#f85149' : s >= 40 ? '#f0a84a' : '#388bfd';
-  const rl = (s: number) => s >= 70 ? '🔴 Высокий' : s >= 40 ? '🟡 Средний' : '🔵 Неизвестный';
+  const rl = (s: number) => s >= 70 ? 'Высокий' : s >= 40 ? 'Средний' : 'Неизвестный';
+  const riskClass = (s: number) => s >= 70 ? 'risk-high' : s >= 40 ? 'risk-medium' : 'risk-low';
   const fmtTime = (d: string) => new Date(d).toLocaleString('ru-RU', {day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'});
   const parseUrl = (r: string) => { const m = r?.match(/URL: ([^\s|]+)/); return m?m[1]:null; };
   const parseFlags = (r: string) => { const m = r?.match(/Flags: (.+?)(\s*\|.*)?$/); return m?m[1].split(', ').filter(Boolean):[]; };
   const parseRt = (r: string) => { const m = r?.match(/Response time: (\d+)s/); return m?parseInt(m[1]):null; };
 
   const nc: Record<string,any> = {
-    info: {bg:'rgba(56,139,253,0.1)',b:'rgba(56,139,253,0.3)',c:'#388bfd'},
-    success: {bg:'rgba(63,185,80,0.1)',b:'rgba(63,185,80,0.3)',c:'#3fb950'},
-    error: {bg:'rgba(248,81,73,0.1)',b:'rgba(248,81,73,0.3)',c:'#f85149'},
-    warning: {bg:'rgba(240,168,74,0.1)',b:'rgba(240,168,74,0.3)',c:'#f0a84a'},
+    info: {bg:'rgba(56,139,253,0.15)',b:'rgba(56,139,253,0.4)',c:'#58a6ff'},
+    success: {bg:'rgba(63,185,80,0.15)',b:'rgba(63,185,80,0.4)',c:'#3fb950'},
+    error: {bg:'rgba(248,81,73,0.15)',b:'rgba(248,81,73,0.4)',c:'#f85149'},
+    warning: {bg:'rgba(240,168,74,0.15)',b:'rgba(240,168,74,0.4)',c:'#f0a84a'},
   };
 
-  const uniqueDomains = Object.values(history.reduce((acc: Record<string,any>, item: any) => {
-    if (!acc[item.domain] || new Date(item.createdAt) > new Date(acc[item.domain].createdAt)) acc[item.domain] = item;
-    return acc;
-  }, {})) as any[];
-  const approved = uniqueDomains.filter((i:any) => i.action === 'approved').length;
-  const blocked = uniqueDomains.filter((i:any) => i.action === 'blocked').length;
+  const statsTotal = allowlist.length + blocklist.length;
+  const statsApproved = allowlist.length;
+  const statsBlocked = blocklist.length;
 
   const groupedHistory = history.reduce((acc: Record<string,any>, item: any) => {
     if (!acc[item.domain]) acc[item.domain] = { domain: item.domain, actions: [], latest: item };
@@ -330,16 +333,19 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
 
   const filteredAllowlist = allowlist
     .filter(d => {
-      // Поиск — нечувствительный к регистру
       const matchSearch = !allowlistFilter ||
         d.domain.toLowerCase().includes(allowlistFilter.toLowerCase()) ||
         (d.notes || '').toLowerCase().includes(allowlistFilter.toLowerCase());
-      // Фильтр по категории
       const matchCategory = !allowlistCategory || d.category === allowlistCategory;
-      // Фильтр по типу global/org
       const matchType = !allowlistTypeFilter ||
         (allowlistTypeFilter === 'global' ? d.isGlobal === true : d.isGlobal === false);
-      return matchSearch && matchCategory && matchType;
+      let matchRecent = true;
+      if (allowlistRecent) {
+        const age = Date.now() - new Date(d.createdAt).getTime();
+        const limit = allowlistRecent === '24h' ? 24*60*60*1000 : 7*24*60*60*1000;
+        matchRecent = age <= limit;
+      }
+      return matchSearch && matchCategory && matchType && matchRecent;
     })
     .sort((a, b) => {
       if (allowlistSort === 'alpha') return a.domain.localeCompare(b.domain);
@@ -360,11 +366,11 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
   }, {});
 
   const tabs = [
-    { id: 'pending', icon: '🔍', label: 'Очередь', count: events.length },
-    { id: 'deferred', icon: '⏸', label: 'Отложенные', count: deferred.length },
-    { id: 'allowlist', icon: '✅', label: 'Allowlist', count: allowlist.length },
-    { id: 'blocklist', icon: '🚫', label: 'Blocklist', count: blocklist.length },
-    { id: 'history', icon: '📋', label: 'История', count: null },
+    { id: 'pending', icon: '\u{1F50D}', label: 'Очередь', count: events.length },
+    { id: 'deferred', icon: '\u{23F8}', label: 'Отложенные', count: deferred.length },
+    { id: 'allowlist', icon: '\u{2705}', label: 'Allowlist', count: allowlist.length },
+    { id: 'blocklist', icon: '\u{1F6AB}', label: 'Blocklist', count: blocklist.length },
+    { id: 'history', icon: '\u{1F4CB}', label: 'История', count: null },
   ];
 
   const DEFER_OPTIONS = [15, 30, 60, 120, 240];
@@ -372,100 +378,110 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
   return (
     <div style={{display:'flex',minHeight:'100vh',background:'#0d1117',fontFamily:'-apple-system,BlinkMacSystemFont,Inter,sans-serif',color:'#e6edf3'}}>
       {/* Sidebar */}
-      <div style={{width:220,background:'#161b22',borderRight:'1px solid #21262d',display:'flex',flexDirection:'column',padding:'16px 0',position:'fixed',top:0,left:0,bottom:0,overflowY:'auto'}}>
-        <div style={{display:'flex',alignItems:'center',gap:10,padding:'0 16px 16px',borderBottom:'1px solid #21262d'}}>
-          <div style={{fontSize:24,background:'linear-gradient(135deg,#388bfd,#8957e5)',borderRadius:8,width:36,height:36,display:'flex',alignItems:'center',justifyContent:'center'}}>🛡️</div>
-          <div>
-            <div style={{fontSize:14,fontWeight:700,color:'#fff'}}>SafeHos</div>
-            <div style={{fontSize:10,color:'#7d8590'}}>Moderator Panel</div>
+      <div className="sidebar">
+        <div style={{display:'flex',alignItems:'center',gap:12,padding:'0 18px 18px',borderBottom:'1px solid #21262d'}}>
+          <div style={{fontSize:22,background:'linear-gradient(135deg,#388bfd,#8957e5)',borderRadius:10,width:40,height:40,display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 4px 12px rgba(56,139,253,0.25)'}}>
+            {'\u{1F6E1}\u{FE0F}'}
+          </div>
+          <div className="sidebar-logo-text">
+            <div style={{fontSize:16,fontWeight:800,color:'#fff',letterSpacing:'-0.3px'}}>SafeHos</div>
+            <div style={{fontSize:10,color:'#484f58',fontWeight:500}}>Moderator Panel</div>
           </div>
         </div>
 
-        <div style={{padding:'12px 16px',borderBottom:'1px solid #21262d'}}>
-          <div style={{fontSize:10,color:'#484f58',marginBottom:8,textTransform:'uppercase',letterSpacing:1}}>Статистика</div>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+        <div className="sidebar-stats" style={{padding:'14px 18px',borderBottom:'1px solid #21262d'}}>
+          <div style={{fontSize:10,color:'#484f58',marginBottom:10,textTransform:'uppercase',letterSpacing:1.2,fontWeight:600}}>Статистика</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
             {[
-              {label:'Всего',value:uniqueDomains.length,c:'#e6edf3'},
+              {label:'Всего',value:statsTotal,c:'#e6edf3'},
               {label:'Очередь',value:events.length,c:events.length>0?'#f85149':'#3fb950'},
-              {label:'Одобрено',value:approved,c:'#3fb950'},
-              {label:'Блок',value:blocked,c:'#f85149'},
+              {label:'Одобрено',value:statsApproved,c:'#3fb950'},
+              {label:'Заблок.',value:statsBlocked,c:'#f85149'},
             ].map(s=>(
-              <div key={s.label} style={{background:'#0d1117',borderRadius:6,padding:'6px 8px',border:'1px solid #21262d'}}>
-                <div style={{fontSize:18,fontWeight:700,color:s.c}}>{s.value}</div>
-                <div style={{fontSize:9,color:'#484f58'}}>{s.label}</div>
+              <div key={s.label} className="stat-card">
+                <div style={{fontSize:20,fontWeight:800,color:s.c,lineHeight:1.2}}>{s.value}</div>
+                <div style={{fontSize:9,color:'#484f58',fontWeight:500,marginTop:2}}>{s.label}</div>
               </div>
             ))}
           </div>
         </div>
 
-        {/* Zero Trust indicator */}
-        <div style={{padding:'10px 16px',borderBottom:'1px solid #21262d'}}>
-          <div style={{background:'rgba(248,81,73,0.08)',border:'1px solid rgba(248,81,73,0.2)',borderRadius:6,padding:'8px 10px'}}>
-            <div style={{fontSize:10,fontWeight:700,color:'#f85149',marginBottom:2}}>🔒 DEFAULT DENY</div>
-            <div style={{fontSize:9,color:'#7d8590'}}>Все неизвестные сайты заблокированы</div>
+        <div className="sidebar-zero-trust" style={{padding:'12px 18px',borderBottom:'1px solid #21262d'}}>
+          <div className="zero-trust-badge">
+            <div style={{fontSize:10,fontWeight:800,color:'#f85149',letterSpacing:0.5}}>DEFAULT DENY</div>
+            <div style={{fontSize:9,color:'#7d8590',marginTop:2}}>Неизвестные сайты заблокированы</div>
           </div>
         </div>
 
-        <nav style={{padding:'10px',flex:1}}>
+        <nav style={{padding:'10px 12px',flex:1}}>
           {tabs.map(tab=>(
             <button key={tab.id}
-              style={{display:'flex',alignItems:'center',gap:8,padding:'9px 10px',borderRadius:8,border:'none',background:activeTab===tab.id?'rgba(56,139,253,0.1)':'transparent',color:activeTab===tab.id?'#388bfd':'#7d8590',fontSize:13,cursor:'pointer',width:'100%',textAlign:'left',fontFamily:'inherit',marginBottom:2}}
+              className={`sidebar-tab ${activeTab===tab.id?'active':''}`}
               onClick={()=>{setActiveTab(tab.id as Tab);if(tab.id==='history')fetchHistory();}}>
-              <span>{tab.icon}</span>
-              <span style={{flex:1}}>{tab.label}</span>
+              <span style={{fontSize:15}}>{tab.icon}</span>
+              <span className="sidebar-tab-label" style={{flex:1}}>{tab.label}</span>
               {tab.count!=null&&tab.count>0&&(
-                <span style={{background:tab.id==='pending'?'#f85149':tab.id==='deferred'?'#f0a84a':'rgba(56,139,253,0.3)',color:'#fff',borderRadius:10,padding:'1px 6px',fontSize:10,fontWeight:700}}>{tab.count}</span>
+                <span className={`badge ${tab.id==='pending'?'badge-danger badge-pulse':tab.id==='deferred'?'badge-warning':'badge-info'}`}>
+                  {tab.count}
+                </span>
               )}
             </button>
           ))}
         </nav>
 
-        <div style={{padding:'12px 16px',borderTop:'1px solid #21262d'}}>
-          <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
-            <div style={{width:28,height:28,background:'linear-gradient(135deg,#388bfd,#8957e5)',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:700,color:'#fff'}}>{user.email[0].toUpperCase()}</div>
+        <div style={{padding:'14px 18px',borderTop:'1px solid #21262d'}}>
+          <div className="sidebar-user-info" style={{display:'flex',alignItems:'center',gap:10,marginBottom:10}}>
+            <div style={{width:32,height:32,background:'linear-gradient(135deg,#388bfd,#8957e5)',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:12,fontWeight:700,color:'#fff',flexShrink:0}}>{user.email[0].toUpperCase()}</div>
             <div style={{flex:1,minWidth:0}}>
-              <div style={{fontSize:11,color:'#e6edf3',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{user.email}</div>
-              <div style={{fontSize:9,color:'#7d8590'}}>{user.role}</div>
+              <div style={{fontSize:12,color:'#e6edf3',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:500}}>{user.email}</div>
+              <div style={{fontSize:10,color:'#7d8590'}}>{user.role}</div>
             </div>
           </div>
-          <button onClick={onLogout} style={{width:'100%',padding:'6px',background:'transparent',border:'1px solid #30363d',borderRadius:5,color:'#7d8590',fontSize:11,cursor:'pointer',fontFamily:'inherit'}}>Выйти</button>
+          <button className="btn btn-ghost sidebar-logout" onClick={onLogout} style={{width:'100%',padding:'7px',borderRadius:6,fontSize:11}}>
+            Выйти
+          </button>
         </div>
       </div>
 
       {/* Main content */}
-      <div style={{marginLeft:220,flex:1,padding:'24px'}}>
-        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+      <div className="main-content" style={{marginLeft:240,flex:1,padding:'28px 32px'}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:24}}>
           <div>
-            <h1 style={{fontSize:18,fontWeight:700,color:'#fff',marginBottom:2}}>
+            <h1 style={{fontSize:20,fontWeight:800,color:'#fff',marginBottom:4,letterSpacing:'-0.3px'}}>
               {tabs.find(t=>t.id===activeTab)?.icon} {tabs.find(t=>t.id===activeTab)?.label}
             </h1>
-            <p style={{fontSize:12,color:'#7d8590'}}>
-              {activeTab==='pending'&&`${events.length} запросов ожидают проверки · обновляется каждые 3с`}
+            <p style={{fontSize:13,color:'#7d8590'}}>
+              {activeTab==='pending'&&`${events.length} запросов ожидают проверки`}
               {activeTab==='deferred'&&`${deferred.length} отложенных`}
-              {activeTab==='allowlist'&&`${allowlist.length} разрешённых доменов`}
+              {activeTab==='allowlist'&&`${allowlist.length} разрешенных доменов`}
               {activeTab==='blocklist'&&`${blocklist.length} заблокированных доменов`}
-              {activeTab==='history'&&`${historyGroups.length} уникальных доменов в истории`}
+              {activeTab==='history'&&`${historyGroups.length} уникальных доменов`}
             </p>
           </div>
-          <div style={{display:'flex',alignItems:'center',gap:5,background:'rgba(63,185,80,0.1)',border:'1px solid rgba(63,185,80,0.2)',borderRadius:20,padding:'5px 10px'}}>
-            <div style={{width:6,height:6,background:'#3fb950',borderRadius:'50%'}}/>
-            <span style={{fontSize:11,color:'#3fb950'}}>Live</span>
+          <div style={{display:'flex',alignItems:'center',gap:6,background:'rgba(63,185,80,0.1)',border:'1px solid rgba(63,185,80,0.2)',borderRadius:20,padding:'6px 12px'}}>
+            <div className="live-dot"/>
+            <span style={{fontSize:11,color:'#3fb950',fontWeight:600}}>Live</span>
           </div>
         </div>
 
+        {/* Notification Toast */}
         {notification&&(
-          <div style={{background:nc[notification.type]?.bg,border:`1px solid ${nc[notification.type]?.b}`,borderRadius:8,padding:'10px 14px',color:nc[notification.type]?.c,fontSize:13,marginBottom:14,fontWeight:500}}>
+          <div className="notification-toast" style={{
+            background: nc[notification.type]?.bg,
+            border: `1px solid ${nc[notification.type]?.b}`,
+            color: nc[notification.type]?.c,
+          }}>
             {notification.msg}
           </div>
         )}
 
         {/* ==================== PENDING ==================== */}
         {activeTab==='pending'&&(
-          <div style={{display:'flex',flexDirection:'column',gap:10}}>
+          <div style={{display:'flex',flexDirection:'column',gap:12}}>
             {events.length===0?(
-              <div style={{textAlign:'center',padding:'70px 20px'}}>
-                <div style={{fontSize:48,marginBottom:12}}>✅</div>
-                <h3 style={{color:'#3fb950',marginBottom:6}}>Очередь пуста</h3>
+              <div className="empty-state">
+                <span className="empty-state-icon">{'\u{2705}'}</span>
+                <h3 style={{color:'#3fb950',marginBottom:8,fontSize:18,fontWeight:700}}>Очередь пуста</h3>
                 <p style={{color:'#7d8590',fontSize:13}}>Все запросы обработаны</p>
               </div>
             ):events.map(event=>{
@@ -473,93 +489,100 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
               const flags=parseFlags(event.reason);
               const color=rc(event.riskScore);
               return(
-                <div key={event.id} style={{background:'#161b22',border:`1px solid ${event.riskScore>=70?'rgba(248,81,73,0.4)':event.riskScore>=40?'rgba(240,168,74,0.3)':'rgba(56,139,253,0.3)'}`,borderRadius:12,padding:'16px 18px'}}>
-                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10,gap:8}}>
-                    <div style={{display:'flex',alignItems:'center',gap:8,flex:1,minWidth:0}}>
-                      <span style={{fontSize:16}}>{event.riskScore>=70?'🚨':event.riskScore>=40?'⚠️':'❓'}</span>
+                <div key={event.id} className={`card-pending ${riskClass(event.riskScore)}`}
+                  style={{background:'#161b22',borderRadius:12,padding:'18px 20px'}}>
+                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12,gap:10}}>
+                    <div style={{display:'flex',alignItems:'center',gap:10,flex:1,minWidth:0}}>
+                      <span style={{fontSize:18}}>{event.riskScore>=70?'\u{1F6A8}':event.riskScore>=40?'\u{26A0}\u{FE0F}':'\u{2753}'}</span>
                       <span style={{fontSize:15,fontWeight:700,fontFamily:'monospace',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{event.domain}</span>
                     </div>
-                    <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0}}>
+                    <div style={{display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
                       <LiveTimer startTime={event.createdAt}/>
-                      <span style={{background:`${color}20`,border:`1px solid ${color}40`,color,padding:'2px 8px',borderRadius:20,fontSize:11,fontWeight:700}}>
+                      <span style={{background:`${color}18`,border:`1px solid ${color}40`,color,padding:'3px 10px',borderRadius:20,fontSize:11,fontWeight:700}}>
                         {rl(event.riskScore)} {event.riskScore}%
                       </span>
                     </div>
                   </div>
 
                   {url&&(
-                    <div style={{display:'flex',alignItems:'center',gap:7,background:'#0d1117',border:'1px solid #21262d',borderRadius:6,padding:'8px 10px',marginBottom:8}}>
-                      <span style={{fontSize:12}}>🔗</span>
-                      <span style={{fontSize:11,color:'#7d8590',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{url}</span>
-                      <a href={url} target="_blank" rel="noreferrer" style={{fontSize:10,color:'#fff',background:'#388bfd',padding:'2px 8px',borderRadius:4,textDecoration:'none',fontWeight:600,flexShrink:0}}>Открыть →</a>
+                    <div className="url-box" style={{marginBottom:10}}>
+                      <span style={{fontSize:12,flexShrink:0}}>{'\u{1F517}'}</span>
+                      <span style={{fontSize:11,color:'#7d8590',flex:1,minWidth:0,wordBreak:'break-all',lineHeight:1.4}}>{url}</span>
+                      <a href={url} target="_blank" rel="noreferrer" className="url-link" style={{flexShrink:0}}>Открыть</a>
                     </div>
                   )}
 
-                  <div style={{display:'flex',gap:12,marginBottom:8,flexWrap:'wrap'}}>
-                    <span style={{fontSize:11,color:'#7d8590'}}>🏢 {event.companyId}</span>
-                    <span style={{fontSize:11,color:'#7d8590'}}>🕐 {fmtTime(event.createdAt)}</span>
+                  <div style={{display:'flex',gap:14,marginBottom:10,flexWrap:'wrap'}}>
+                    {event.requestedBy&&<span style={{fontSize:11,color:'#58a6ff',fontWeight:500}}>{'\u{1F464}'} {event.requestedBy}</span>}
+                    <span style={{fontSize:11,color:'#7d8590'}}>{'\u{1F3E2}'} {event.companyId}</span>
+                    <span style={{fontSize:11,color:'#7d8590'}}>{'\u{1F550}'} {fmtTime(event.createdAt)}</span>
                   </div>
 
                   {flags.length>0&&(
-                    <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:12}}>
+                    <div style={{display:'flex',flexWrap:'wrap',gap:5,marginBottom:14}}>
                       {flags.map((f:string,i:number)=>(
-                        <span key={i} style={{background:'rgba(240,168,74,0.08)',border:'1px solid rgba(240,168,74,0.2)',borderRadius:4,padding:'2px 6px',fontSize:10,color:'#f0a84a'}}>{f}</span>
+                        <span key={i} className="tag tag-flag">{f}</span>
                       ))}
                     </div>
                   )}
 
-                  <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>
-                    <button style={{flex:1,minWidth:80,padding:'9px',background:'rgba(63,185,80,0.08)',border:'1px solid rgba(63,185,80,0.3)',borderRadius:7,color:'#3fb950',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}
+                  <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                    <button className="btn btn-approve"
+                      style={{flex:1,minWidth:80,padding:'10px',borderRadius:8,fontSize:12,fontWeight:600}}
                       onClick={()=>handleDecision(event.id,'approved',false,{isWildcard:false,category:'other'})}
                       disabled={deciding===event.id}>
-                      {deciding===event.id?'...':'✅ Одобрить'}
+                      {deciding===event.id?'...':'Одобрить'}
                     </button>
 
-                    {/* Кнопка Wildcard — одобряет КОРНЕВОЙ домен + все поддомены */}
                     {(()=>{
                       const rootDomain = getRootDomain(event.domain);
                       const isSubdomain = rootDomain !== event.domain;
                       return (
-                        <button
-                          style={{flex:1,minWidth:80,padding:'9px',background:'rgba(63,185,80,0.05)',border:'2px dashed rgba(63,185,80,0.4)',borderRadius:7,color:'#3fb950',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit',display:'flex',alignItems:'center',justifyContent:'center',gap:4,flexDirection:'column'}}
+                        <button className="btn btn-wildcard"
+                          style={{flex:1,minWidth:80,padding:'10px',borderRadius:8,fontSize:12,fontWeight:600,display:'flex',alignItems:'center',justifyContent:'center',gap:4,flexDirection:'column'}}
                           onClick={()=>handleWildcardDecision(event.id, event.domain, 'approved', false)}
                           disabled={deciding===event.id}
                           title={`Одобрить *.${rootDomain} (все поддомены)`}>
                           {deciding===event.id?'...':<>
-                            <span style={{fontSize:11}}>✅ *.{rootDomain}</span>
-                            {isSubdomain&&<span style={{fontSize:9,opacity:0.7}}>корень: {rootDomain}</span>}
+                            <span style={{fontSize:11}}>*.{rootDomain}</span>
+                            {isSubdomain&&<span style={{fontSize:9,opacity:0.7}}>wildcard</span>}
                           </>}
                         </button>
                       );
                     })()}
 
-                    <button style={{flex:1,minWidth:80,padding:'9px',background:'rgba(248,81,73,0.08)',border:'1px solid rgba(248,81,73,0.3)',borderRadius:7,color:'#f85149',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}
+                    <button className="btn btn-block"
+                      style={{flex:1,minWidth:80,padding:'10px',borderRadius:8,fontSize:12,fontWeight:600}}
                       onClick={()=>handleDecision(event.id,'blocked',false)}
                       disabled={deciding===event.id}>
-                      {deciding===event.id?'...':'🚫 Заблокировать'}
+                      {deciding===event.id?'...':'Заблокировать'}
                     </button>
+
                     <div style={{position:'relative'}}>
-                      <button style={{padding:'9px 12px',background:'rgba(240,168,74,0.08)',border:'1px solid rgba(240,168,74,0.3)',borderRadius:7,color:'#f0a84a',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}
+                      <button className="btn btn-defer"
+                        style={{padding:'10px 14px',borderRadius:8,fontSize:12,fontWeight:600}}
                         onClick={()=>setShowDeferPicker(showDeferPicker===event.id?null:event.id)}
-                        disabled={deciding===event.id}>⏸ Отложить</button>
+                        disabled={deciding===event.id}>
+                        Отложить
+                      </button>
                       {showDeferPicker===event.id&&(
-                        <div style={{position:'absolute',bottom:'calc(100% + 6px)',right:0,background:'#1c2128',border:'1px solid #30363d',borderRadius:8,padding:'8px',zIndex:100,minWidth:160,boxShadow:'0 8px 24px rgba(0,0,0,0.4)'}}>
-                          <div style={{fontSize:10,color:'#484f58',marginBottom:6,textTransform:'uppercase',letterSpacing:1}}>Отложить на:</div>
+                        <div className="defer-dropdown">
+                          <div style={{fontSize:10,color:'#484f58',marginBottom:6,textTransform:'uppercase',letterSpacing:1,fontWeight:600}}>Отложить на:</div>
                           {DEFER_OPTIONS.map(min=>(
-                            <button key={min}
-                              style={{display:'block',width:'100%',padding:'7px 10px',background:'transparent',border:'none',borderRadius:5,color:'#e6edf3',fontSize:12,cursor:'pointer',textAlign:'left',fontFamily:'inherit'}}
-                              onMouseEnter={e=>(e.target as HTMLElement).style.background='rgba(56,139,253,0.1)'}
-                              onMouseLeave={e=>(e.target as HTMLElement).style.background='transparent'}
-                              onClick={()=>handleDefer(event.id,min)}>
+                            <button key={min} className="defer-option" onClick={()=>handleDefer(event.id,min)}>
                               {min<60?`${min} минут`:`${min/60} час${min===60?'':min===120?'а':'ов'}`}
                             </button>
                           ))}
                         </div>
                       )}
                     </div>
-                    <button style={{padding:'9px 10px',background:'rgba(137,87,229,0.08)',border:'1px solid rgba(137,87,229,0.3)',borderRadius:7,color:'#8957e5',fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}
+
+                    <button className="btn btn-global"
+                      style={{padding:'10px 12px',borderRadius:8,fontSize:11,fontWeight:600}}
                       onClick={()=>handleDecision(event.id,'approved',true,{isWildcard:true,category:'other'})}
-                      disabled={deciding===event.id} title="Одобрить глобально (для всех компаний)">🌍 Глобально</button>
+                      disabled={deciding===event.id} title="Одобрить глобально (для всех компаний)">
+                      {'\u{1F30D}'} Global
+                    </button>
                   </div>
                 </div>
               );
@@ -569,27 +592,33 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
 
         {/* ==================== DEFERRED ==================== */}
         {activeTab==='deferred'&&(
-          <div style={{display:'flex',flexDirection:'column',gap:10}}>
+          <div style={{display:'flex',flexDirection:'column',gap:12}}>
             {deferred.length===0?(
-              <div style={{textAlign:'center',padding:'70px 20px'}}>
-                <div style={{fontSize:48,marginBottom:12}}>⏸</div>
-                <h3 style={{color:'#f0a84a',marginBottom:6}}>Нет отложенных</h3>
+              <div className="empty-state">
+                <span className="empty-state-icon">{'\u{23F8}'}</span>
+                <h3 style={{color:'#f0a84a',marginBottom:8,fontSize:18,fontWeight:700}}>Нет отложенных</h3>
               </div>
             ):deferred.map(event=>{
               const url=parseUrl(event.reason);
               return(
-                <div key={event.id} style={{background:'#161b22',border:'1px solid rgba(240,168,74,0.3)',borderRadius:12,padding:'16px 18px'}}>
-                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
-                    <span>⏸</span>
-                    <span style={{fontSize:15,fontWeight:700,fontFamily:'monospace'}}>{event.domain}</span>
-                    <span style={{fontSize:11,color:'#f0a84a',marginLeft:'auto'}}>{fmtTime(event.createdAt)}</span>
+                <div key={event.id} className="card" style={{border:'1px solid rgba(240,168,74,0.3)',padding:'18px 20px'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
+                    <span style={{fontSize:16}}>{'\u{23F8}'}</span>
+                    <span style={{fontSize:15,fontWeight:700,fontFamily:'monospace',flex:1}}>{event.domain}</span>
+                    <span style={{fontSize:11,color:'#f0a84a'}}>{fmtTime(event.createdAt)}</span>
                   </div>
-                  {url&&<div style={{fontSize:11,color:'#484f58',marginBottom:10,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{url}</div>}
-                  <div style={{display:'flex',gap:7}}>
-                    <button style={{flex:1,padding:'8px',background:'rgba(63,185,80,0.08)',border:'1px solid rgba(63,185,80,0.3)',borderRadius:7,color:'#3fb950',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}
-                      onClick={()=>handleDecision(event.id,'approved')} disabled={deciding===event.id}>✅ Одобрить</button>
-                    <button style={{flex:1,padding:'8px',background:'rgba(248,81,73,0.08)',border:'1px solid rgba(248,81,73,0.3)',borderRadius:7,color:'#f85149',fontSize:12,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}
-                      onClick={()=>handleDecision(event.id,'blocked')} disabled={deciding===event.id}>🚫 Заблокировать</button>
+                  {url&&<div style={{fontSize:11,color:'#484f58',marginBottom:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{url}</div>}
+                  <div style={{display:'flex',gap:8}}>
+                    <button className="btn btn-approve"
+                      style={{flex:1,padding:'10px',borderRadius:8,fontSize:12,fontWeight:600}}
+                      onClick={()=>handleDecision(event.id,'approved')} disabled={deciding===event.id}>
+                      Одобрить
+                    </button>
+                    <button className="btn btn-block"
+                      style={{flex:1,padding:'10px',borderRadius:8,fontSize:12,fontWeight:600}}
+                      onClick={()=>handleDecision(event.id,'blocked')} disabled={deciding===event.id}>
+                      Заблокировать
+                    </button>
                   </div>
                 </div>
               );
@@ -600,162 +629,226 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
         {/* ==================== ALLOWLIST ==================== */}
         {activeTab==='allowlist'&&(
           <div>
-            {/* Recently Approved — вверху */}
-            {recentlyApproved.length>0&&(
-              <div style={{marginBottom:16,background:'rgba(63,185,80,0.05)',border:'1px solid rgba(63,185,80,0.2)',borderRadius:10,padding:'12px 16px'}}>
-                <div style={{fontSize:11,fontWeight:700,color:'#3fb950',marginBottom:8,textTransform:'uppercase',letterSpacing:1}}>
-                  ✅ Недавно одобренные (в этой сессии) — {recentlyApproved.length}
-                </div>
-                <div style={{display:'flex',flexDirection:'column',gap:4}}>
-                  {recentlyApproved.map((r:any,i:number)=>(
-                    <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'6px 10px',background:'rgba(63,185,80,0.05)',borderRadius:6}}>
-                      <span style={{fontSize:13,fontFamily:'monospace',color:'#3fb950',flex:1}}>{r.domain}</span>
-                      <span style={{fontSize:10,color:'#484f58'}}>⏱ {r.responseTime}с</span>
-                      {r.isGlobal&&<span style={{fontSize:9,background:'rgba(56,139,253,0.1)',border:'1px solid rgba(56,139,253,0.2)',color:'#388bfd',padding:'1px 5px',borderRadius:3}}>global</span>}
-                      <span style={{fontSize:10,color:'#484f58'}}>{new Date(r.approvedAt).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit'})}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
             {/* Toolbar */}
-            <div style={{display:'flex',gap:10,marginBottom:16,flexWrap:'wrap'}}>
-              <input
-                placeholder="🔍 Поиск домена..."
-                value={allowlistFilter}
-                onChange={e=>setAllowlistFilter(e.target.value)}
-                style={{flex:1,minWidth:200,padding:'8px 12px',background:'#161b22',border:'1px solid #30363d',borderRadius:7,color:'#e6edf3',fontSize:13,fontFamily:'inherit',outline:'none'}}
-              />
-              <select
-                value={allowlistCategory}
-                onChange={e=>setAllowlistCategory(e.target.value)}
-                style={{padding:'8px 12px',background:'#161b22',border:'1px solid #30363d',borderRadius:7,color:'#e6edf3',fontSize:13,fontFamily:'inherit',outline:'none'}}>
+            <div className="toolbar">
+              <input className="input" placeholder="Поиск домена..." value={allowlistFilter} onChange={e=>setAllowlistFilter(e.target.value)}
+                style={{flex:1,minWidth:200}} />
+              <select className="select" value={allowlistCategory} onChange={e=>setAllowlistCategory(e.target.value)}>
                 <option value="">Все категории</option>
-                {CATEGORIES.map(c=><option key={c} value={c}>{CATEGORY_LABELS[c]}</option>)}
+                {CATEGORIES.map(c=><option key={c} value={c}>{CATEGORY_ICONS[c]} {CATEGORY_LABELS[c]}</option>)}
               </select>
-              <button
-                onClick={()=>setShowAddForm(!showAddForm)}
-                style={{padding:'8px 16px',background:'rgba(63,185,80,0.1)',border:'1px solid rgba(63,185,80,0.3)',borderRadius:7,color:'#3fb950',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}>
-                + Добавить домен
+              <button className="btn btn-approve" style={{padding:'9px 18px',borderRadius:8,fontSize:13,fontWeight:600}} onClick={()=>setShowAddForm(!showAddForm)}>
+                + Добавить
               </button>
-              <button
-                onClick={handleExport}
-                style={{padding:'8px 14px',background:'rgba(56,139,253,0.1)',border:'1px solid rgba(56,139,253,0.3)',borderRadius:7,color:'#388bfd',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}>
-                📥 CSV
+              <button className="btn btn-primary" style={{padding:'9px 16px',borderRadius:8,fontSize:13,fontWeight:600}} onClick={handleExport}>
+                CSV
               </button>
-              <label style={{padding:'8px 14px',background:'rgba(63,185,80,0.1)',border:'1px solid rgba(63,185,80,0.3)',borderRadius:7,color:'#3fb950',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:'inherit',display:'inline-flex',alignItems:'center',gap:5}}>
-                {importing ? '⏳...' : '📤 Импорт'}
+              <label className="btn btn-approve" style={{padding:'9px 16px',borderRadius:8,fontSize:13,fontWeight:600,display:'inline-flex',alignItems:'center',gap:5}}>
+                {importing ? '...' : 'Импорт'}
                 <input type="file" accept=".csv" onChange={handleImportCSV} style={{display:'none'}} />
               </label>
-              <select value={allowlistSort} onChange={e=>setAllowlistSort(e.target.value as any)}
-                style={{padding:'8px 10px',background:'#161b22',border:'1px solid #30363d',borderRadius:7,color:'#e6edf3',fontSize:12,fontFamily:'inherit',outline:'none'}}>
-                <option value="alpha">A→Z</option>
+              <select className="select" value={allowlistSort} onChange={e=>setAllowlistSort(e.target.value as any)} style={{fontSize:12}}>
+                <option value="alpha">A{'\u{2192}'}Z</option>
                 <option value="newest">Новые</option>
                 <option value="oldest">Старые</option>
               </select>
-              <select value={allowlistTypeFilter} onChange={e=>setAllowlistTypeFilter(e.target.value as any)}
-                style={{padding:'8px 10px',background:'#161b22',border:'1px solid #30363d',borderRadius:7,color:'#e6edf3',fontSize:12,fontFamily:'inherit',outline:'none'}}>
+              <select className="select" value={allowlistTypeFilter} onChange={e=>setAllowlistTypeFilter(e.target.value as any)} style={{fontSize:12}}>
                 <option value="">Все ({allowlist.length})</option>
-                <option value="global">🌍 Global ({allowlist.filter(d=>d.isGlobal).length})</option>
-                <option value="org">🏢 Org ({allowlist.filter(d=>!d.isGlobal).length})</option>
+                <option value="global">Global ({allowlist.filter(d=>d.isGlobal).length})</option>
+                <option value="org">Org ({allowlist.filter(d=>!d.isGlobal).length})</option>
+              </select>
+              <select className="select" value={allowlistRecent} onChange={e=>setAllowlistRecent(e.target.value as any)} style={{fontSize:12}}>
+                <option value="">Все время</option>
+                <option value="24h">За 24 часа</option>
+                <option value="7d">За 7 дней</option>
               </select>
             </div>
 
             {/* Add form */}
             {showAddForm&&(
-              <div style={{background:'#161b22',border:'1px solid rgba(63,185,80,0.3)',borderRadius:10,padding:'16px',marginBottom:16}}>
-                <div style={{fontSize:13,fontWeight:600,color:'#3fb950',marginBottom:12}}>✅ Добавить домен в allowlist</div>
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
-                  <input placeholder="domain.com" value={addForm.domain} onChange={e=>setAddForm({...addForm,domain:e.target.value})}
-                    style={{padding:'8px 12px',background:'#0d1117',border:'1px solid #30363d',borderRadius:6,color:'#e6edf3',fontSize:13,fontFamily:'inherit',outline:'none'}}/>
-                  <select value={addForm.category} onChange={e=>setAddForm({...addForm,category:e.target.value})}
-                    style={{padding:'8px 12px',background:'#0d1117',border:'1px solid #30363d',borderRadius:6,color:'#e6edf3',fontSize:13,fontFamily:'inherit',outline:'none'}}>
-                    {CATEGORIES.map(c=><option key={c} value={c}>{CATEGORY_LABELS[c]}</option>)}
+              <div className="add-form">
+                <div style={{fontSize:14,fontWeight:700,color:'#3fb950',marginBottom:14}}>Добавить домен в allowlist</div>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+                  <input className="input" placeholder="domain.com" value={addForm.domain} onChange={e=>setAddForm({...addForm,domain:e.target.value})} />
+                  <select className="select" value={addForm.category} onChange={e=>setAddForm({...addForm,category:e.target.value})}>
+                    {CATEGORIES.map(c=><option key={c} value={c}>{CATEGORY_ICONS[c]} {CATEGORY_LABELS[c]}</option>)}
                   </select>
-                  <input placeholder="Заметка (необязательно)" value={addForm.notes} onChange={e=>setAddForm({...addForm,notes:e.target.value})}
-                    style={{padding:'8px 12px',background:'#0d1117',border:'1px solid #30363d',borderRadius:6,color:'#e6edf3',fontSize:13,fontFamily:'inherit',outline:'none',gridColumn:'1/-1'}}/>
+                  <input className="input" placeholder="Заметка (необязательно)" value={addForm.notes} onChange={e=>setAddForm({...addForm,notes:e.target.value})}
+                    style={{gridColumn:'1/-1'}} />
                 </div>
-                <div style={{display:'flex',gap:12,marginBottom:12}}>
+                <div style={{display:'flex',gap:14,marginBottom:14}}>
                   <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:'#7d8590',cursor:'pointer'}}>
                     <input type="checkbox" checked={addForm.isWildcard} onChange={e=>setAddForm({...addForm,isWildcard:e.target.checked})}/>
                     Wildcard (*.domain.com)
                   </label>
                   <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:'#7d8590',cursor:'pointer'}}>
                     <input type="checkbox" checked={addForm.isGlobal} onChange={e=>setAddForm({...addForm,isGlobal:e.target.checked})}/>
-                    Глобально (для всех компаний)
+                    Глобально
                   </label>
                 </div>
                 <div style={{display:'flex',gap:8}}>
-                  <button onClick={handleAddToAllowlist}
-                    style={{padding:'8px 20px',background:'rgba(63,185,80,0.1)',border:'1px solid rgba(63,185,80,0.3)',borderRadius:6,color:'#3fb950',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}>
-                    ✅ Добавить
+                  <button className="btn btn-approve" style={{padding:'9px 22px',borderRadius:8,fontSize:13,fontWeight:600}} onClick={handleAddToAllowlist}>
+                    Добавить
                   </button>
-                  <button onClick={()=>setShowAddForm(false)}
-                    style={{padding:'8px 16px',background:'transparent',border:'1px solid #30363d',borderRadius:6,color:'#7d8590',fontSize:13,cursor:'pointer',fontFamily:'inherit'}}>
+                  <button className="btn btn-ghost" style={{padding:'9px 18px',borderRadius:8,fontSize:13}} onClick={()=>setShowAddForm(false)}>
                     Отмена
                   </button>
                 </div>
               </div>
             )}
 
-            {/* Allowlist by category */}
-            {Object.entries(allowlistByCategory).sort().map(([cat, domains]) => (
-              <div key={cat} style={{marginBottom:16}}>
-                <div style={{fontSize:12,fontWeight:600,color:'#484f58',marginBottom:8,textTransform:'uppercase',letterSpacing:1}}>
-                  {CATEGORY_LABELS[cat] || cat} ({(domains as any[]).length})
+            {/* Allowlist by category with subdomain grouping */}
+            {Object.entries(allowlistByCategory).sort(([a],[b]) => a==='other'?-1:b==='other'?1:a.localeCompare(b)).map(([cat, domains]) => {
+              // Group domains by root domain within this category
+              const byRoot: Record<string, { root: any|null, subs: any[] }> = {};
+              (domains as any[]).forEach((d: any) => {
+                const rootDomain = getRootDomain(d.domain);
+                if (!byRoot[rootDomain]) byRoot[rootDomain] = { root: null, subs: [] };
+                if (d.domain === rootDomain) {
+                  byRoot[rootDomain].root = d;
+                } else {
+                  byRoot[rootDomain].subs.push(d);
+                }
+              });
+              // Sort root groups by the first item's sort key to preserve category-level sort order
+              const rootKeys = Object.keys(byRoot).sort((a, b) => {
+                const aFirst = byRoot[a].root || byRoot[a].subs[0];
+                const bFirst = byRoot[b].root || byRoot[b].subs[0];
+                if (!aFirst || !bFirst) return 0;
+                if (allowlistSort === 'alpha') return a.localeCompare(b);
+                if (allowlistSort === 'newest') return new Date(bFirst.createdAt).getTime() - new Date(aFirst.createdAt).getTime();
+                if (allowlistSort === 'oldest') return new Date(aFirst.createdAt).getTime() - new Date(bFirst.createdAt).getTime();
+                return 0;
+              });
+
+              return (
+                <div key={cat} style={{marginBottom:20}}>
+                  <div className="category-header">
+                    {CATEGORY_ICONS[cat]} {CATEGORY_LABELS[cat] || cat} ({(domains as any[]).length})
+                  </div>
+                  <div style={{display:'flex',flexDirection:'column',gap:5}}>
+                    {rootKeys.map(rootDomain => {
+                      const group = byRoot[rootDomain];
+                      const hasSubs = group.subs.length > 0;
+                      const groupKey = `${cat}::${rootDomain}`;
+                      const isExpanded = expandedGroups.has(groupKey);
+
+                      // Single domain, is the root itself, no subs -> render as plain item
+                      if (group.root && !hasSubs) {
+                        const d = group.root;
+                        return (
+                          <div key={d.id} className="list-item">
+                            <span style={{fontSize:13,fontFamily:'monospace',color:'#e6edf3',flex:1}}>{d.domain}</span>
+                            {d.isWildcard&&<span className="tag tag-wildcard" style={{fontSize:9}}>wildcard</span>}
+                            {d.isGlobal&&<span className="tag tag-global" style={{fontSize:9}}>global</span>}
+                            {d.notes&&<span style={{fontSize:11,color:'#484f58',maxWidth:180,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.notes}</span>}
+                            <button className="btn btn-edit-sm" style={{padding:'4px 9px',borderRadius:5,fontSize:10,flexShrink:0}}
+                              onClick={()=>{setEditEntry(d);setEditForm({category:d.category||'other',notes:d.notes||'',isWildcard:d.isWildcard||false});}}>
+                              Edit
+                            </button>
+                            <button className="btn btn-danger-sm" style={{padding:'4px 9px',borderRadius:5,fontSize:10,flexShrink:0}}
+                              onClick={()=>handleRemoveFromAllowlist(d.domain)}>
+                              Del
+                            </button>
+                          </div>
+                        );
+                      }
+
+                      // Group with subdomains
+                      return (
+                        <div key={groupKey} style={{borderRadius:8,border:'1px solid #21262d',overflow:'hidden'}}>
+                          {/* Group header */}
+                          {group.root ? (
+                            // Root domain exists - render as normal item + expand toggle
+                            <div className="list-item" style={{borderBottom: isExpanded ? '1px solid #21262d' : 'none'}}>
+                              <button onClick={()=>toggleGroup(groupKey)}
+                                style={{background:'none',border:'none',cursor:'pointer',padding:0,color:'#484f58',fontSize:11,transition:'transform 0.2s',transform:isExpanded?'rotate(180deg)':'rotate(0deg)',display:'flex',alignItems:'center',flexShrink:0}}>
+                                {'\u25BC'}
+                              </button>
+                              <span style={{fontSize:13,fontFamily:'monospace',color:'#e6edf3',flex:1}}>{group.root.domain}</span>
+                              <span style={{fontSize:10,color:'#484f58',flexShrink:0}}>{group.subs.length} sub{group.subs.length!==1?'s':''}</span>
+                              {group.root.isWildcard&&<span className="tag tag-wildcard" style={{fontSize:9}}>wildcard</span>}
+                              {group.root.isGlobal&&<span className="tag tag-global" style={{fontSize:9}}>global</span>}
+                              {group.root.notes&&<span style={{fontSize:11,color:'#484f58',maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{group.root.notes}</span>}
+                              <button className="btn btn-edit-sm" style={{padding:'4px 9px',borderRadius:5,fontSize:10,flexShrink:0}}
+                                onClick={()=>{setEditEntry(group.root);setEditForm({category:group.root.category||'other',notes:group.root.notes||'',isWildcard:group.root.isWildcard||false});}}>
+                                Edit
+                              </button>
+                              <button className="btn btn-danger-sm" style={{padding:'4px 9px',borderRadius:5,fontSize:10,flexShrink:0}}
+                                onClick={()=>handleRemoveFromAllowlist(group.root.domain)}>
+                                Del
+                              </button>
+                            </div>
+                          ) : (
+                            // Virtual container - root domain not in allowlist
+                            <div className="list-item" onClick={()=>toggleGroup(groupKey)}
+                              style={{cursor:'pointer',background:'rgba(139,148,158,0.04)',borderBottom: isExpanded ? '1px solid #21262d' : 'none'}}>
+                              <span style={{color:'#484f58',fontSize:11,transition:'transform 0.2s',transform:isExpanded?'rotate(180deg)':'rotate(0deg)',display:'inline-block',flexShrink:0}}>{'\u25BC'}</span>
+                              <span style={{fontSize:13,fontFamily:'monospace',color:'#7d8590',flex:1,fontStyle:'italic'}}>{rootDomain}</span>
+                              <span style={{fontSize:10,color:'#484f58',background:'rgba(139,148,158,0.08)',border:'1px solid #21262d',padding:'2px 8px',borderRadius:10,flexShrink:0}}>
+                                {group.subs.length} subdomain{group.subs.length!==1?'s':''}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Expanded subdomains */}
+                          {isExpanded && (
+                            <div style={{background:'rgba(13,17,23,0.5)'}}>
+                              {group.subs.map((d: any) => (
+                                <div key={d.id} className="list-item" style={{paddingLeft:32,borderBottom:'1px solid #161b22'}}>
+                                  <span style={{fontSize:11,color:'#484f58',flexShrink:0,marginRight:2}}>{'\u21B3'}</span>
+                                  <span style={{fontSize:13,fontFamily:'monospace',color:'#e6edf3',flex:1}}>{d.domain}</span>
+                                  {d.isWildcard&&<span className="tag tag-wildcard" style={{fontSize:9}}>wildcard</span>}
+                                  {d.isGlobal&&<span className="tag tag-global" style={{fontSize:9}}>global</span>}
+                                  {d.notes&&<span style={{fontSize:11,color:'#484f58',maxWidth:140,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.notes}</span>}
+                                  <button className="btn btn-edit-sm" style={{padding:'4px 9px',borderRadius:5,fontSize:10,flexShrink:0}}
+                                    onClick={()=>{setEditEntry(d);setEditForm({category:d.category||'other',notes:d.notes||'',isWildcard:d.isWildcard||false});}}>
+                                    Edit
+                                  </button>
+                                  <button className="btn btn-danger-sm" style={{padding:'4px 9px',borderRadius:5,fontSize:10,flexShrink:0}}
+                                    onClick={()=>handleRemoveFromAllowlist(d.domain)}>
+                                    Del
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div style={{display:'flex',flexDirection:'column',gap:4}}>
-                  {(domains as any[]).map((d:any)=>(
-                    <div key={d.id} style={{display:'flex',alignItems:'center',gap:10,background:'#161b22',border:'1px solid #21262d',borderRadius:8,padding:'10px 14px'}}>
-                      <span style={{fontSize:13,fontFamily:'monospace',color:'#e6edf3',flex:1}}>{d.domain}</span>
-                      {d.isWildcard&&<span style={{fontSize:9,background:'rgba(137,87,229,0.1)',border:'1px solid rgba(137,87,229,0.2)',color:'#8957e5',padding:'1px 5px',borderRadius:3}}>wildcard</span>}
-                      {d.isGlobal&&<span style={{fontSize:9,background:'rgba(56,139,253,0.1)',border:'1px solid rgba(56,139,253,0.2)',color:'#388bfd',padding:'1px 5px',borderRadius:3}}>global</span>}
-                      {d.notes&&<span style={{fontSize:11,color:'#484f58'}}>{d.notes}</span>}
-                      <button onClick={()=>{setEditEntry(d);setEditForm({category:d.category||'other',notes:d.notes||'',isWildcard:d.isWildcard||false});}}
-                        style={{padding:'3px 8px',background:'rgba(56,139,253,0.06)',border:'1px solid rgba(56,139,253,0.2)',borderRadius:4,color:'#388bfd',fontSize:10,cursor:'pointer',fontFamily:'inherit',flexShrink:0}}>
-                        ✏️
-                      </button>
-                    <button onClick={()=>handleRemoveFromAllowlist(d.domain)}
-                        style={{padding:'3px 8px',background:'rgba(248,81,73,0.06)',border:'1px solid rgba(248,81,73,0.2)',borderRadius:4,color:'#f85149',fontSize:10,cursor:'pointer',fontFamily:'inherit',flexShrink:0}}>
-                        🗑
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+              );
+            })}
 
             {filteredAllowlist.length===0&&(
-              <div style={{textAlign:'center',padding:'60px 20px'}}>
-                <div style={{fontSize:44,marginBottom:12}}>✅</div>
+              <div className="empty-state">
+                <span className="empty-state-icon">{'\u{2705}'}</span>
                 <p style={{color:'#7d8590',fontSize:13}}>Нет доменов по фильтру</p>
               </div>
             )}
 
             {/* Edit Modal */}
             {editEntry&&(
-              <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}}>
-                <div style={{background:'#161b22',border:'1px solid #30363d',borderRadius:12,padding:'24px',width:400,maxWidth:'90vw'}}>
-                  <div style={{fontSize:15,fontWeight:700,color:'#e6edf3',marginBottom:4}}>✏️ Редактировать домен</div>
-                  <div style={{fontSize:12,color:'#7d8590',marginBottom:16,fontFamily:'monospace'}}>{editEntry.domain}</div>
-                  <select value={editForm.category} onChange={e=>setEditForm({...editForm,category:e.target.value})}
-                    style={{width:'100%',padding:'8px 12px',background:'#0d1117',border:'1px solid #30363d',borderRadius:6,color:'#e6edf3',fontSize:13,fontFamily:'inherit',outline:'none',marginBottom:10}}>
-                    {CATEGORIES.map(c=><option key={c} value={c}>{CATEGORY_LABELS[c]}</option>)}
+              <div className="modal-overlay" onClick={(e)=>{if(e.target===e.currentTarget)setEditEntry(null)}}>
+                <div className="modal-card">
+                  <div style={{fontSize:16,fontWeight:800,color:'#e6edf3',marginBottom:6}}>Редактировать домен</div>
+                  <div style={{fontSize:13,color:'#7d8590',marginBottom:18,fontFamily:'monospace'}}>{editEntry.domain}</div>
+                  <select className="select" value={editForm.category} onChange={e=>setEditForm({...editForm,category:e.target.value})}
+                    style={{width:'100%',marginBottom:12}}>
+                    {CATEGORIES.map(c=><option key={c} value={c}>{CATEGORY_ICONS[c]} {CATEGORY_LABELS[c]}</option>)}
                   </select>
-                  <input placeholder="Заметка" value={editForm.notes} onChange={e=>setEditForm({...editForm,notes:e.target.value})}
-                    style={{width:'100%',padding:'8px 12px',background:'#0d1117',border:'1px solid #30363d',borderRadius:6,color:'#e6edf3',fontSize:13,fontFamily:'inherit',outline:'none',marginBottom:10}}/>
-                  <label style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:'#7d8590',marginBottom:16,cursor:'pointer'}}>
+                  <input className="input" placeholder="Заметка" value={editForm.notes} onChange={e=>setEditForm({...editForm,notes:e.target.value})}
+                    style={{width:'100%',marginBottom:12}} />
+                  <label style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:'#7d8590',marginBottom:20,cursor:'pointer'}}>
                     <input type="checkbox" checked={editForm.isWildcard} onChange={e=>setEditForm({...editForm,isWildcard:e.target.checked})}/>
                     Wildcard (*.{editEntry.domain})
                   </label>
                   <div style={{display:'flex',gap:8}}>
-                    <button onClick={handleEditSave}
-                      style={{flex:1,padding:'9px',background:'rgba(63,185,80,0.1)',border:'1px solid rgba(63,185,80,0.3)',borderRadius:6,color:'#3fb950',fontSize:13,fontWeight:600,cursor:'pointer',fontFamily:'inherit'}}>
-                      💾 Сохранить
+                    <button className="btn btn-approve" style={{flex:1,padding:'10px',borderRadius:8,fontSize:13,fontWeight:600}} onClick={handleEditSave}>
+                      Сохранить
                     </button>
-                    <button onClick={()=>setEditEntry(null)}
-                      style={{padding:'9px 16px',background:'transparent',border:'1px solid #30363d',borderRadius:6,color:'#7d8590',fontSize:13,cursor:'pointer',fontFamily:'inherit'}}>
+                    <button className="btn btn-ghost" style={{padding:'10px 18px',borderRadius:8,fontSize:13}} onClick={()=>setEditEntry(null)}>
                       Отмена
                     </button>
                   </div>
@@ -768,61 +861,43 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
         {/* ==================== BLOCKLIST ==================== */}
         {activeTab==='blocklist'&&(
           <div>
-            {/* Поиск */}
-            <div style={{display:'flex',gap:10,marginBottom:16}}>
-              <input
-                placeholder="🔍 Поиск домена..."
-                value={blocklistFilter}
-                onChange={e=>setBlocklistFilter(e.target.value)}
-                style={{flex:1,padding:'8px 12px',background:'#161b22',border:'1px solid #30363d',borderRadius:7,color:'#e6edf3',fontSize:13,fontFamily:'inherit',outline:'none'}}
-              />
+            <div className="toolbar">
+              <input className="input" placeholder="Поиск домена..." value={blocklistFilter} onChange={e=>setBlocklistFilter(e.target.value)}
+                style={{flex:1}} />
               {blocklistFilter&&(
-                <button onClick={()=>setBlocklistFilter('')}
-                  style={{padding:'8px 12px',background:'transparent',border:'1px solid #30363d',borderRadius:7,color:'#7d8590',fontSize:13,cursor:'pointer',fontFamily:'inherit'}}>
-                  ✕ Сбросить
+                <button className="btn btn-ghost" style={{padding:'9px 14px',borderRadius:8,fontSize:13}} onClick={()=>setBlocklistFilter('')}>
+                  Сбросить
                 </button>
               )}
             </div>
 
-            {/* Список */}
             <div style={{display:'flex',flexDirection:'column',gap:6}}>
               {filteredBlocklist.length===0?(
-                <div style={{textAlign:'center',padding:'60px 20px'}}>
-                  <div style={{fontSize:44,marginBottom:12}}>🚫</div>
+                <div className="empty-state">
+                  <span className="empty-state-icon">{'\u{1F6AB}'}</span>
                   <p style={{color:'#7d8590',fontSize:13}}>
-                    {blocklistFilter ? `Ничего не найдено по "${blocklistFilter}"` : 'Список блокировок пуст'}
+                    {blocklistFilter ? `Ничего не найдено` : 'Список блокировок пуст'}
                   </p>
                 </div>
               ):filteredBlocklist.map((d:any)=>(
-                <div key={d.id} style={{display:'flex',alignItems:'center',gap:10,background:'#161b22',border:'1px solid rgba(248,81,73,0.15)',borderRadius:8,padding:'10px 14px'}}>
-                  <span style={{fontSize:14,flexShrink:0}}>🚫</span>
+                <div key={d.id} className="list-item list-item-blocklist">
+                  <span style={{fontSize:14,flexShrink:0}}>{'\u{1F6AB}'}</span>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:13,fontFamily:'monospace',color:'#e6edf3',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.domain}</div>
                     {d.reason&&<div style={{fontSize:10,color:'#484f58',marginTop:2,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{d.reason}</div>}
                   </div>
-                  {d.isGlobal&&(
-                    <span style={{fontSize:9,background:'rgba(248,81,73,0.1)',border:'1px solid rgba(248,81,73,0.2)',color:'#f85149',padding:'1px 5px',borderRadius:3,flexShrink:0}}>global</span>
-                  )}
+                  {d.isGlobal&&<span className="tag tag-global" style={{fontSize:9,color:'#f85149',background:'rgba(248,81,73,0.1)',borderColor:'rgba(248,81,73,0.2)'}}>global</span>}
                   <span style={{fontSize:10,color:'#484f58',flexShrink:0}}>{fmtTime(d.createdAt)}</span>
-                  <button
-                    onClick={()=>handleRemoveFromAllowlist(d.domain)}
-                    title="Разблокировать домен"
-                    style={{padding:'5px 10px',background:'rgba(63,185,80,0.06)',border:'1px solid rgba(63,185,80,0.2)',borderRadius:5,color:'#3fb950',fontSize:11,fontWeight:600,cursor:'pointer',fontFamily:'inherit',flexShrink:0,whiteSpace:'nowrap'}}>
-                    ↩️ Разблокировать
-                  </button>
-                  <button
-                    onClick={()=>{if(window.confirm(`Удалить ${d.domain} из blocklist?`))handleRemoveFromAllowlist(d.domain);}}
-                    title="Удалить из blocklist"
-                    style={{padding:'5px 8px',background:'rgba(248,81,73,0.06)',border:'1px solid rgba(248,81,73,0.2)',borderRadius:5,color:'#f85149',fontSize:11,cursor:'pointer',fontFamily:'inherit',flexShrink:0}}>
-                    🗑
+                  <button className="btn btn-unblock" style={{padding:'6px 12px',borderRadius:6,fontSize:11,fontWeight:600,flexShrink:0,whiteSpace:'nowrap'}}
+                    onClick={()=>handleUnblock(d.domain)} title="Разблокировать и добавить в Allowlist">
+                    Разблокировать
                   </button>
                 </div>
               ))}
             </div>
 
-            {/* Счётчик */}
             {blocklistFilter&&filteredBlocklist.length>0&&(
-              <div style={{marginTop:10,fontSize:11,color:'#484f58',textAlign:'center'}}>
+              <div style={{marginTop:12,fontSize:11,color:'#484f58',textAlign:'center'}}>
                 Найдено: {filteredBlocklist.length} из {blocklist.length}
               </div>
             )}
@@ -833,8 +908,8 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
         {activeTab==='history'&&(
           <div style={{display:'flex',flexDirection:'column',gap:8}}>
             {historyGroups.length===0?(
-              <div style={{textAlign:'center',padding:'60px 20px'}}>
-                <div style={{fontSize:44,marginBottom:12}}>📋</div>
+              <div className="empty-state">
+                <span className="empty-state-icon">{'\u{1F4CB}'}</span>
                 <p style={{color:'#7d8590',fontSize:13}}>История пуста</p>
               </div>
             ):historyGroups.map((group:any)=>{
@@ -842,27 +917,35 @@ export default function ModeratorPanel({ user, onLogout }: Props) {
               const isExp=expanded===group.domain;
               const rt=parseRt(latest.reason);
               return(
-                <div key={group.domain} style={{background:'#161b22',border:'1px solid #21262d',borderRadius:10,overflow:'hidden'}}>
-                  <div style={{display:'flex',alignItems:'center',gap:10,padding:'12px 16px',cursor:'pointer'}} onClick={()=>setExpanded(isExp?null:group.domain)}>
-                    <div style={{fontSize:16,flexShrink:0}}>{latest.action==='approved'?'✅':'🚫'}</div>
+                <div key={group.domain} className="history-item">
+                  <div className="history-item-header" onClick={()=>setExpanded(isExp?null:group.domain)}>
+                    <div style={{fontSize:16,flexShrink:0}}>{latest.action==='approved'?'\u{2705}':'\u{1F6AB}'}</div>
                     <div style={{flex:1,minWidth:0}}>
                       <div style={{fontSize:13,fontFamily:'monospace',color:'#e6edf3',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{group.domain}</div>
-                      <div style={{fontSize:10,color:'#484f58',marginTop:1}}>{group.actions.length} действий · {fmtTime(latest.createdAt)}</div>
+                      <div style={{fontSize:10,color:'#484f58',marginTop:2}}>
+                        {group.actions.length} действий &middot; {fmtTime(latest.createdAt)}
+                        {latest.moderatorEmail&&<span> &middot; {latest.moderatorEmail}</span>}
+                      </div>
                     </div>
-                    {rt!=null&&<div style={{fontSize:10,color:rt<30?'#3fb950':rt<120?'#f0a84a':'#f85149',fontFamily:'monospace',background:'#0d1117',padding:'2px 6px',borderRadius:4,border:'1px solid #21262d',flexShrink:0}}>⏱ {rt<60?`${rt}с`:`${Math.floor(rt/60)}м`}</div>}
-                    <div style={{fontSize:11,fontWeight:600,color:latest.action==='approved'?'#3fb950':'#f85149',flexShrink:0}}>{latest.action==='approved'?'Одобрен':'Заблокирован'}</div>
-                    <span style={{color:'#484f58',fontSize:11}}>{isExp?'▲':'▼'}</span>
+                    {latest.source&&<span className="tag" style={{fontSize:9,background:'rgba(56,139,253,0.1)',border:'1px solid rgba(56,139,253,0.2)',color:'#58a6ff',flexShrink:0}}>{latest.source}</span>}
+                    {latest.category&&<span style={{fontSize:9,color:'#484f58',flexShrink:0}}>{CATEGORY_ICONS[latest.category]||''}</span>}
+                    {rt!=null&&<div style={{fontSize:10,color:rt<30?'#3fb950':rt<120?'#f0a84a':'#f85149',fontFamily:'monospace',background:'#0d1117',padding:'3px 8px',borderRadius:5,border:'1px solid #21262d',flexShrink:0}}>{rt<60?`${rt}s`:`${Math.floor(rt/60)}m`}</div>}
+                    <div style={{fontSize:11,fontWeight:700,color:latest.action==='approved'?'#3fb950':'#f85149',flexShrink:0}}>{latest.action==='approved'?'Одобрен':'Заблокирован'}</div>
+                    <span style={{color:'#484f58',fontSize:11,transition:'transform 0.2s',transform:isExp?'rotate(180deg)':'rotate(0deg)',display:'inline-block'}}>{'\u{25BC}'}</span>
                   </div>
                   {isExp&&(
                     <div style={{borderTop:'1px solid #21262d',padding:'10px 16px',background:'#0d1117'}}>
                       {group.actions.map((action:any,i:number)=>{
                         const art=parseRt(action.reason);
                         return(
-                          <div key={action.id} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:i<group.actions.length-1?'1px solid #21262d':'none'}}>
-                            <span style={{fontSize:13}}>{action.action==='approved'?'✅':'🚫'}</span>
+                          <div key={action.id} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 0',borderBottom:i<group.actions.length-1?'1px solid #21262d':'none'}}>
+                            <span style={{fontSize:13}}>{action.action==='approved'?'\u{2705}':'\u{1F6AB}'}</span>
                             <span style={{fontSize:11,color:action.action==='approved'?'#3fb950':'#f85149',fontWeight:600}}>{action.action==='approved'?'Одобрен':'Заблокирован'}</span>
-                            {art!=null&&<span style={{fontSize:10,color:'#7d8590',fontFamily:'monospace'}}>за {art<60?`${art}с`:`${Math.floor(art/60)}м ${art%60}с`}</span>}
+                            {action.source&&<span className="tag" style={{fontSize:9,background:'rgba(56,139,253,0.1)',border:'1px solid rgba(56,139,253,0.2)',color:'#58a6ff'}}>{action.source}</span>}
+                            {action.category&&<span style={{fontSize:9,color:'#7d8590'}}>{CATEGORY_ICONS[action.category]||''} {CATEGORY_LABELS[action.category]||action.category}</span>}
+                            {art!=null&&<span style={{fontSize:10,color:'#7d8590',fontFamily:'monospace'}}>за {art<60?`${art}s`:`${Math.floor(art/60)}m ${art%60}s`}</span>}
                             <span style={{flex:1}}/>
+                            {action.moderatorEmail&&<span style={{fontSize:10,color:'#58a6ff'}}>{action.moderatorEmail.split('@')[0]}</span>}
                             <span style={{fontSize:10,color:'#484f58'}}>{fmtTime(action.createdAt)}</span>
                           </div>
                         );
